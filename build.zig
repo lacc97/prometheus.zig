@@ -19,4 +19,15 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     test_step.dependOn(&b.addRunArtifact(mod_tests).step);
+
+    const prometheus_cmd = addPrometheusControlCommand(b);
+    if (b.args) |args| prometheus_cmd.addArgs(args);
+    b.step("prometheus", "Control test prometheus instance").dependOn(&prometheus_cmd.step);
+}
+
+fn addPrometheusControlCommand(b: *std.Build) *std.Build.Step.Run {
+    const cmd = b.addSystemCommand(&.{"/bin/bash"});
+    cmd.addFileArg(.{ .path = "test/prometheus/control.sh" });
+    cmd.has_side_effects = true;
+    return cmd;
 }
