@@ -7,14 +7,14 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
 
     const mod = b.addModule("prometheus.zig", .{
-        .root_source_file = "src/prometheus.zig",
+        .root_source_file = .{ .path = "src/prometheus.zig" },
         .target = target,
         .optimize = optimize,
     });
     _ = mod; // autofix
 
     const mod_tests = b.addTest(.{
-        .root_source_file = "src/prometheus.zig",
+        .root_source_file = .{ .path = "src/prometheus.zig" },
         .target = target,
         .optimize = optimize,
     });
