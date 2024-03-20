@@ -77,14 +77,14 @@ pub fn Gauge(comptime itype: enum { int, float }) type {
     };
 }
 
-pub fn Family(comptime MetricFamily: type, comptime Dims: type) type {
+pub fn Family(comptime metric_type: MetricType, comptime Dims: type) type {
     return struct {
         const Self = @This();
 
         reg: *Registry,
-        ptr: *MetricFamily,
+        ptr: *Registry.MetricFamily,
 
-        pub const Metric = MetricFamily.Metric;
+        pub const Metric = metric_type.Type();
         pub const Dimensions = Dims;
 
         pub fn add(fam: Self, m: *Metric, dimensions: Dimensions) !void {
@@ -100,13 +100,7 @@ pub const Registry = struct {
 
     strings: StringIntern = .{},
 
-    metrics: std.StringHashMapUnmanaged(MetricType) = .{},
-    metrics_data: struct {
-        int_counter: std.StringArrayHashMapUnmanaged(*MetricFamily(.int_counter)) = .{},
-        float_counter: std.StringArrayHashMapUnmanaged(*MetricFamily(.float_counter)) = .{},
-        int_gauge: std.StringArrayHashMapUnmanaged(*MetricFamily(.int_gauge)) = .{},
-        float_gauge: std.StringArrayHashMapUnmanaged(*MetricFamily(.float_gauge)) = .{},
-    } = .{},
+    metrics: std.StringArrayHashMapUnmanaged(*MetricFamily) = .{},
 
     pub fn init(gpa: std.mem.Allocator) Registry {
         return .{ .gpa = gpa };
@@ -114,16 +108,9 @@ pub const Registry = struct {
     pub fn deinit(reg: *Registry) void {
         const gpa = reg.gpa;
 
-        inline for (@typeInfo(MetricType).Enum.fields) |f| {
-            const data = &@field(reg.metrics_data, f.name);
-
-            var it = data.iterator();
-            while (it.next()) |entry| {
-                entry.value_ptr.*.deinit(gpa);
-                gpa.destroy(entry.value_ptr.*);
-            }
-
-            data.deinit(gpa);
+        for (reg.metrics.values()) |v| {
+            v.deinit(gpa);
+            gpa.destroy(v);
         }
 
         reg.metrics.deinit(gpa);
@@ -140,59 +127,43 @@ pub const Registry = struct {
         name: []const u8,
         help: []const u8,
         comptime opts: FamilyOpts,
-    ) error{OutOfMemory}!Family(MetricFamily(opts.metric_type), opts.Dimensions) {
+    ) error{ MismatchedType, OutOfMemory }!Family(opts.metric_type, opts.Dimensions) {
         reg.mutex.lock();
         defer reg.mutex.unlock();
 
         const gpa = reg.gpa;
 
-        const metric_type_key_ptr, const metric_type_ptr, const data_index, const data_key_ptr, const data_ptr = blk_ptrs: {
-            // Lookup the family name in the appropriate maps.
+        const index, const key_ptr, const value_ptr = blk_ptrs: {
+            const gop = try reg.metrics.getOrPut(gpa, name);
+            errdefer if (!gop.found_existing) reg.metrics.swapRemoveAt(gop.index);
 
-            const metrics_gop = try reg.metrics.getOrPut(gpa, name);
-            errdefer if (!metrics_gop.found_existing) reg.metrics.removeByPtr(metrics_gop.key_ptr);
-
-            const data = &@field(reg.metrics_data, @tagName(opts.metric_type));
-            const data_gop = try data.getOrPut(gpa, name);
-            errdefer if (!data_gop.found_existing) data.removeByPtr(data_gop.key_ptr);
-
-            // Either we find a match in both hashmaps or in none.
-            assert(@intFromBool(metrics_gop.found_existing) ^ @intFromBool(data_gop.found_existing) == 0);
-
-            if (metrics_gop.found_existing) return .{ .reg = reg, .ptr = data_gop.value_ptr.* };
-            break :blk_ptrs .{ metrics_gop.key_ptr, metrics_gop.value_ptr, data_gop.index, data_gop.key_ptr, data_gop.value_ptr };
+            if (gop.found_existing) return .{ .reg = reg, .ptr = gop.value_ptr.* };
+            break :blk_ptrs .{ gop.index, gop.key_ptr, gop.value_ptr };
         };
-        // The family is new and needs to be initialised.
-        errdefer {
-            @field(reg.metrics_data, @tagName(opts.metric_type)).swapRemoveAt(data_index);
-            reg.metrics.removeByPtr(metric_type_key_ptr);
-        }
+        errdefer reg.metrics.swapRemoveAt(index);
 
         const label_names: []const []const u8 = comptime labelNames(opts.Dimensions);
 
         const name_interned = try reg.strings.intern(gpa, name);
-        metric_type_key_ptr.* = name_interned;
-        data_key_ptr.* = name_interned;
+        key_ptr.* = name_interned;
+        value_ptr.* = try gpa.create(MetricFamily);
+        errdefer gpa.destroy(value_ptr.*);
 
-        metric_type_ptr.* = opts.metric_type;
-
-        data_ptr.* = try gpa.create(MetricFamily(opts.metric_type));
-        errdefer gpa.destroy(data_ptr.*);
-
-        data_ptr.*.* = .{
+        value_ptr.*.* = .{
             .name = name_interned,
             .help = try reg.strings.intern(gpa, help),
             .labels = label_names,
+            .data = @unionInit(std.meta.FieldType(MetricFamily, .data), @tagName(opts.metric_type), .{}),
         };
 
-        return .{ .reg = reg, .ptr = data_ptr.* };
+        return .{ .reg = reg, .ptr = value_ptr.* };
     }
 
     fn addMetric(
         reg: *Registry,
         comptime metric_type: MetricType,
-        mf: *MetricFamily(metric_type),
-        m: *MetricFamily(metric_type).Metric,
+        metric_family: *MetricFamily,
+        metric: *metric_type.Type(),
         comptime Dimensions: type,
         dims: Dimensions,
     ) error{ FoundExisting, IncompatibleDimensions, OutOfMemory }!void {
@@ -203,39 +174,44 @@ pub const Registry = struct {
 
         const label_names = comptime labelNames(Dimensions);
         {
-            if (label_names.len != mf.labels.len) return error.IncompatibleDimensions;
-            for (label_names, mf.labels) |name_new, name| if (!std.mem.eql(u8, name_new, name)) return error.IncompatibleDimensions;
+            if (label_names.len != metric_family.labels.len) return error.IncompatibleDimensions;
+            for (label_names, metric_family.labels) |name_new, name| if (!std.mem.eql(u8, name_new, name)) return error.IncompatibleDimensions;
         }
 
         const labels = try gpa.alloc([]const u8, label_names.len);
         errdefer gpa.free(labels);
 
+        // It's fine to format the labels here even before checking the map. If the labels are duplicate,
+        // they were already interned. Otherwise, we were going to intern them anyway.
         inline for (labels, @typeInfo(Dimensions).Struct.fields) |*l, f| {
-            l.* = try formatLabel(&reg.strings, f.type, @field(dims, f.name));
+            l.* = try formatLabel(gpa, &reg.strings, f.type, @field(dims, f.name));
         }
 
-        const gop = try mf.data.getOrPut(gpa, labels);
+        const gop = try @field(metric_family.data, @tagName(metric_type)).getOrPut(gpa, labels);
         if (gop.found_existing) return error.FoundExisting;
-        gop.value_ptr.* = m;
+        gop.value_ptr.* = metric;
     }
 
-    fn MetricFamily(comptime metric_type: MetricType) type {
-        return struct {
-            const Self = @This();
+    const MetricFamily = struct {
+        name: []const u8,
+        help: []const u8,
+        labels: []const []const u8,
+        data: union(MetricType) {
+            int_counter: std.ArrayHashMapUnmanaged([]const []const u8, *MetricType.int_counter.Type(), LabelsHashMapContext, true),
+            float_counter: std.ArrayHashMapUnmanaged([]const []const u8, *MetricType.float_counter.Type(), LabelsHashMapContext, true),
+            int_gauge: std.ArrayHashMapUnmanaged([]const []const u8, *MetricType.int_gauge.Type(), LabelsHashMapContext, true),
+            float_gauge: std.ArrayHashMapUnmanaged([]const []const u8, *MetricType.float_gauge.Type(), LabelsHashMapContext, true),
+        },
 
-            name: []const u8,
-            help: []const u8,
-            labels: []const []const u8,
-            data: std.ArrayHashMapUnmanaged([]const []const u8, *Metric, LabelsHashMapContext, true) = .{},
-
-            pub const Metric = metric_type.Type();
-
-            pub fn deinit(self: *Self, gpa: std.mem.Allocator) void {
-                for (self.data.keys()) |k| gpa.free(k);
-                self.data.deinit(gpa);
+        pub fn deinit(self: *MetricFamily, gpa: std.mem.Allocator) void {
+            switch (self.data) {
+                inline else => |*data| {
+                    for (data.keys()) |k| gpa.free(k);
+                    data.deinit(gpa);
+                },
             }
-        };
-    }
+        }
+    };
 
     fn labelNames(comptime Dimensions: type) []const []const u8 {
         const struct_info = switch (@typeInfo(Dimensions)) {
@@ -289,9 +265,9 @@ pub const Registry = struct {
         };
     }
 
-    fn formatLabel(strings: *StringIntern, comptime Field: type, f: Field) error{OutOfMemory}![]const u8 {
+    fn formatLabel(gpa: std.mem.Allocator, strings: *StringIntern, comptime Field: type, f: Field) error{OutOfMemory}![]const u8 {
         if (@typeInfo(Field) == .Optional) {
-            if (f) |f_child| return formatLabel(strings, @typeInfo(Field).Optional.child, f_child);
+            if (f) |f_child| return formatLabel(gpa, strings, @typeInfo(Field).Optional.child, f_child);
             return "";
         }
 
@@ -302,14 +278,13 @@ pub const Registry = struct {
         return switch (FormattingType) {
             u64, i64, f64 => blk: {
                 var buf: [64]u8 = undefined;
-                break :blk try strings.intern(std.fmt.bufPrint(&buf, "{}", .{f_format}) catch unreachable);
+                break :blk try strings.intern(gpa, std.fmt.bufPrint(&buf, "{}", .{f_format}) catch unreachable);
             },
-            []const u8 => try strings.intern(f_format),
-            Field => blk: {
+            []const u8 => try strings.intern(gpa, f_format),
+            else => if (FormattingType == Field) blk: {
                 assert(@typeInfo(Field) == .Enum);
                 break :blk @tagName(f_format);
-            },
-            else => unreachable,
+            } else unreachable,
         };
     }
 };
