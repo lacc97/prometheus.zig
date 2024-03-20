@@ -1,0 +1,8 @@
+.{
+    .name = "prometheus.zig_examples_full",
+    .version = "0.0.0",
+    .dependencies = .{
+        .@"prometheus.zig" = .{ .path = "../.." },
+    },
+    .paths = .{ "build.zig", "build.zig.zon", "src" },
+}
