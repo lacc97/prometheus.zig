@@ -20,4 +20,12 @@ pub fn main() !void {
 
     var tcp_rx_counter: prometheus.Counter(.int) = .{};
     try family.add(&tcp_rx_counter, .{ .protocol = .tcp, .direction = .rx });
+
+    const family_2 = try registry.family("my_float", "Floaty number of float thingies", .{
+        .metric_type = .float_gauge,
+        .Dimensions = struct { opt_label: ?enum { a, b } = null, name: []const u8, id: u16 },
+    });
+
+    var floaty: prometheus.Gauge(.float) = .{};
+    try family_2.add(&floaty, .{ .name = "hello", .id = 0 });
 }
