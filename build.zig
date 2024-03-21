@@ -11,7 +11,6 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    _ = mod; // autofix
 
     const mod_tests = b.addTest(.{
         .root_source_file = .{ .path = "src/prometheus.zig" },
@@ -23,6 +22,20 @@ pub fn build(b: *std.Build) void {
     const prometheus_cmd = addPrometheusControlCommand(b);
     if (b.args) |args| prometheus_cmd.addArgs(args);
     b.step("prometheus", "Control test prometheus instance").dependOn(&prometheus_cmd.step);
+
+    const exe = b.addExecutable(.{
+        .name = "example",
+        .root_source_file = .{ .path = "examples/full/src/main.zig" },
+        .target = target,
+        .optimize = optimize,
+    });
+    exe.root_module.addImport("prometheus", mod);
+    b.installArtifact(exe);
+
+    const exe_run = b.addRunArtifact(exe);
+    exe_run.has_side_effects = true;
+    if (b.args) |args| exe_run.addArgs(args);
+    b.step("run", "Run this example").dependOn(&exe_run.step);
 }
 
 fn addPrometheusControlCommand(b: *std.Build) *std.Build.Step.Run {
