@@ -38,7 +38,7 @@ pub fn Counter(comptime itype: enum { int, float }) type {
         }
 
         pub inline fn inc(c: *C, x: T) void {
-            @atomicRmw(T, &c.value, .Add, x, .monotonic);
+            _ = @atomicRmw(T, &c.value, .Add, x, .monotonic);
         }
     };
 }
@@ -68,11 +68,11 @@ pub fn Gauge(comptime itype: enum { int, float }) type {
         }
 
         pub inline fn inc(g: *G, x: T) void {
-            @atomicRmw(T, &g.value, .Add, x, .monotonic);
+            _ = @atomicRmw(T, &g.value, .Add, x, .monotonic);
         }
 
         pub inline fn dec(g: *G, x: T) void {
-            @atomicRmw(T, &g.value, .Sub, x, .monotonic);
+            _ = @atomicRmw(T, &g.value, .Sub, x, .monotonic);
         }
     };
 }
