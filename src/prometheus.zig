@@ -34,7 +34,7 @@ pub fn Counter(comptime itype: enum { int, float }) type {
         };
 
         pub inline fn get(c: *const C) T {
-            @atomicLoad(T, &c.value, .monotonic);
+            return @atomicLoad(T, &c.value, .monotonic);
         }
 
         pub inline fn inc(c: *C, x: T) void {
@@ -60,7 +60,7 @@ pub fn Gauge(comptime itype: enum { int, float }) type {
         };
 
         pub inline fn get(g: *const G) T {
-            @atomicLoad(T, &g.value, .monotonic);
+            return @atomicLoad(T, &g.value, .monotonic);
         }
 
         pub inline fn set(g: *G, x: T) T {
