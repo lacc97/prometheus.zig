@@ -117,6 +117,34 @@ pub const Registry = struct {
         reg.strings.deinit(gpa);
     }
 
+    pub fn write(reg: *Registry, w: anytype) !void {
+        for (reg.metrics.values()) |fam| {
+            if (fam.help.len > 0) try w.print("# HELP {s} {s}\n", .{ fam.name, fam.help });
+            try w.print("# TYPE {s} {s}\n", .{ fam.name, switch (std.meta.activeTag(fam.data)) {
+                .int_counter, .float_counter => "counter",
+                .int_gauge, .float_gauge => "gauge",
+            } });
+            switch (fam.data) {
+                inline else => |data| {
+                    for (data.keys(), data.values()) |labels, metric| {
+                        std.debug.assert(labels.len == fam.labels.len);
+
+                        try w.writeAll(fam.name);
+                        if (labels.len > 0) {
+                            try w.writeByte('{');
+                            for (fam.labels, labels) |name, value| {
+                                if (value.len > 0) try w.print("{s}=\"{s}\",", .{ name, value });
+                            }
+                            try w.writeByte('}');
+                        }
+                        try w.print(" {}\n", .{metric.get()});
+                    }
+                },
+            }
+            try w.writeAll("\n");
+        }
+    }
+
     pub const FamilyOpts = struct {
         metric_type: MetricType,
         Dimensions: type,

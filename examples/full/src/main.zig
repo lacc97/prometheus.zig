@@ -35,4 +35,8 @@ pub fn main() !void {
         f.* = .{};
         try family_2.add(f, .{ .name = "hello", .id = @intCast(i) });
     }
+
+    var buffered = std.io.bufferedWriter(std.io.getStdOut().writer());
+    try registry.write(buffered.writer());
+    try buffered.flush();
 }
