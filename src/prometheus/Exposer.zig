@@ -9,7 +9,52 @@ mutex: std.Thread.Mutex = .{},
 gpa: std.mem.Allocator,
 collectables: std.ArrayListUnmanaged(Collector) = .{},
 
+stats: Statistics = .{},
+
+exhibitionism: ?InitOptions.Exhibitionism = null,
+
+pub fn init(exposer: *Exposer, gpa: std.mem.Allocator, opts: InitOptions) error{OutOfMemory}!void {
+    exposer.* = .{ .gpa = gpa };
+
+    if (opts.exhibitionism) |exh| {
+        const prefix = try gpa.dupe(u8, exh.prefix);
+        errdefer gpa.free(prefix);
+
+        var labels = try std.ArrayListUnmanaged(MetricLabel).initCapacity(gpa, exh.labels.len);
+        errdefer {
+            for (0..labels.items.len) |i| labels.items[labels.items.len - 1 - i].deinit(gpa);
+            labels.deinit(gpa);
+        }
+
+        for (exh.labels) |l| labels.appendAssumeCapacity(try l.dupe(gpa));
+
+        exposer.exhibitionism = .{
+            .prefix = prefix,
+            .labels = labels.toOwnedSlice(gpa) catch unreachable,
+        };
+    }
+}
+
+pub const InitOptions = struct {
+    /// Configuration of how the exposer should expose it's own scraping metrics.
+    /// If null the exposer will not expose itself.
+    exhibitionism: ?Exhibitionism = null,
+
+    pub const Exhibitionism = struct {
+        /// A string to be prefixed to every exposer metric.
+        prefix: []const u8 = "",
+
+        /// A list of labels to be added to every exposer metric.
+        labels: []const MetricLabel = &.{},
+    };
+};
+
 pub fn deinit(exposer: *Exposer) void {
+    if (exposer.exhibitionism) |exh| {
+        for (exh.labels) |l| l.deinit(exposer.gpa);
+        exposer.gpa.free(exh.labels);
+        exposer.gpa.free(exh.prefix);
+    }
     exposer.collectables.deinit(exposer.gpa);
 }
 
@@ -28,104 +73,102 @@ pub fn collectAndWriteAll(exposer: *Exposer, w: anytype) !void {
     var arena_state = std.heap.ArenaAllocator.init(exposer.gpa);
     defer arena_state.deinit();
 
-    try writeAll(w, try collectAll(arena_state.allocator(), exposer.collectables.items));
+    try writeAll(w, try exposer.collectAll(arena_state.allocator()));
 }
 
-fn collectAll(arena: std.mem.Allocator, collectors: []const Collector) !std.StringArrayHashMapUnmanaged(MetricFamily) {
-    var families_collected_count: u64 = 0;
-    var families_skipped_invalid_name_count: u64 = 0;
-    var families_skipped_mismatched_help_count: u64 = 0;
-    var families_skipped_mismatched_type_count: u64 = 0;
-    var metrics_collected_count: u64 = 0;
-    var metrics_skipped_count: u64 = 0;
-    var metrics_skipped_mismatched_type_count: u64 = 0;
-    var metrics_skipped_invalid_labels_count: u64 = 0;
-    var metrics_skipped_duplicate_count: u64 = 0;
+fn collectAll(exposer: *Exposer, arena: std.mem.Allocator) !std.StringArrayHashMapUnmanaged(MetricFamily) {
+    const expose_self = exposer.exhibitionism != null;
 
     var families: std.StringArrayHashMapUnmanaged(MetricFamily) = .{};
+    for (exposer.collectables.items) |c| try exposer.collectSingle(arena, &families, c);
+    if (expose_self) try exposer.collectSingle(arena, &families, .{ .ptr = exposer, .vtb = &.{ .collect = collectSelf } });
+    return families;
+}
 
-    for (collectors) |c| {
-        const families_collected = try c.collect(arena);
+fn collectSingle(
+    exposer: *Exposer,
+    arena: std.mem.Allocator,
+    families: *std.StringArrayHashMapUnmanaged(MetricFamily),
+    c: Collector,
+) !void {
+    const families_collected = try c.collect(arena);
 
-        try families.ensureUnusedCapacity(arena, families_collected.len);
-        for (families_collected) |f_collected| {
-            families_collected_count += 1;
-            metrics_collected_count += f_collected.data.len;
+    try families.ensureUnusedCapacity(arena, families_collected.len);
+    for (families_collected) |f_collected| {
+        exposer.stats.families_collected_count_total += 1;
+        exposer.stats.metrics_collected_count_total += f_collected.data.len;
 
-            if (f_collected.data.len == 0) {
+        if (f_collected.data.len == 0) {
+            continue;
+        }
+
+        if (!isValidMetricName(f_collected.name)) {
+            exposer.stats.families_failed_count_total += 1;
+            exposer.stats.metrics_failed_count_total += f_collected.data.len;
+            continue;
+        }
+
+        const f = blk_f: {
+            const gop = families.getOrPutAssumeCapacity(f_collected.name);
+            if (!gop.found_existing) gop.value_ptr.* = .{
+                .name = f_collected.name,
+                .help = f_collected.help,
+                .type = f_collected.type,
+                .data = .{},
+            };
+            break :blk_f gop.value_ptr;
+        };
+
+        if (f_collected.type != f.type) {
+            exposer.stats.families_failed_count_total += 1;
+            exposer.stats.metrics_failed_count_total += f_collected.data.len;
+            continue;
+        }
+
+        if (!std.mem.eql(u8, f_collected.help, f.help)) {
+            exposer.stats.families_failed_count_total += 1;
+            exposer.stats.metrics_failed_count_total += f_collected.data.len;
+            continue;
+        }
+
+        try f.data.ensureUnusedCapacity(arena, f_collected.data.len);
+        for (f_collected.data) |m_collected| {
+            if (std.meta.activeTag(m_collected.value) != f.type) {
+                exposer.stats.metrics_failed_count_total += 1;
                 continue;
             }
 
-            if (!isValidMetricName(f_collected.name)) {
-                families_skipped_invalid_name_count += 1;
-                metrics_skipped_count += f_collected.data.len;
+            if (!isValidMetricLabels(m_collected.labels)) {
+                exposer.stats.metrics_failed_count_total += 1;
                 continue;
             }
 
-            const f = blk_f: {
-                const gop = families.getOrPutAssumeCapacity(f_collected.name);
-                if (!gop.found_existing) gop.value_ptr.* = .{
-                    .name = f_collected.name,
-                    .help = f_collected.help,
-                    .type = f_collected.type,
-                    .data = .{},
-                };
-                break :blk_f gop.value_ptr;
+            // Collect all non-empty values.
+            const labels = blk_labels: {
+                var labels = try std.ArrayListUnmanaged(MetricLabel).initCapacity(arena, m_collected.labels.len);
+                for (m_collected.labels) |l_collected| if (l_collected.v.len > 0) labels.appendAssumeCapacity(l_collected);
+                break :blk_labels labels.toOwnedSlice(arena) catch unreachable;
             };
 
-            if (f_collected.type != f.type) {
-                families_skipped_mismatched_type_count += 1;
-                metrics_skipped_count += f_collected.data.len;
+            std.sort.pdq(
+                MetricLabel,
+                labels,
+                {},
+                struct {
+                    fn lessThan(_: void, a: MetricLabel, b: MetricLabel) bool {
+                        return std.mem.order(u8, a.n, b.n) == .lt;
+                    }
+                }.lessThan,
+            );
+
+            const gop = f.data.getOrPutAssumeCapacity(labels);
+            if (gop.found_existing) {
+                exposer.stats.metrics_failed_count_total += 1;
                 continue;
             }
-
-            if (!std.mem.eql(u8, f_collected.help, f.help)) {
-                families_skipped_mismatched_help_count += 1;
-                metrics_skipped_count += f_collected.data.len;
-                continue;
-            }
-
-            try f.data.ensureUnusedCapacity(arena, f_collected.data.len);
-            for (f_collected.data) |m_collected| {
-                if (std.meta.activeTag(m_collected.value) != f.type) {
-                    metrics_skipped_mismatched_type_count += 1;
-                    continue;
-                }
-
-                if (!isValidMetricLabels(m_collected.labels)) {
-                    metrics_skipped_invalid_labels_count += 1;
-                    continue;
-                }
-
-                // Collect all non-empty values.
-                const labels = blk_labels: {
-                    var labels = try std.ArrayListUnmanaged(MetricLabel).initCapacity(arena, m_collected.labels.len);
-                    for (m_collected.labels) |l_collected| if (l_collected.v.len > 0) labels.appendAssumeCapacity(l_collected);
-                    break :blk_labels labels.toOwnedSlice(arena) catch unreachable;
-                };
-
-                std.sort.pdq(
-                    MetricLabel,
-                    labels,
-                    {},
-                    struct {
-                        fn lessThan(_: void, a: MetricLabel, b: MetricLabel) bool {
-                            return std.mem.order(u8, a.n, b.n) == .lt;
-                        }
-                    }.lessThan,
-                );
-
-                const gop = f.data.getOrPutAssumeCapacity(labels);
-                if (gop.found_existing) {
-                    metrics_skipped_duplicate_count += 1;
-                    continue;
-                }
-                gop.value_ptr.* = m_collected.value;
-            }
+            gop.value_ptr.* = m_collected.value;
         }
     }
-
-    return families;
 }
 
 fn writeAll(w: anytype, families: std.StringArrayHashMapUnmanaged(MetricFamily)) !void {
@@ -176,16 +219,49 @@ fn writeFloatMetric(
 }
 
 const Statistics = struct {
-    var families_collected_count: u64 = 0;
-    var families_skipped_invalid_name_count: u64 = 0;
-    var families_skipped_mismatched_help_count: u64 = 0;
-    var families_skipped_mismatched_type_count: u64 = 0;
-    var metrics_collected_count: u64 = 0;
-    var metrics_skipped_count: u64 = 0;
-    var metrics_skipped_mismatched_type_count: u64 = 0;
-    var metrics_skipped_invalid_labels_count: u64 = 0;
-    var metrics_skipped_duplicate_count: u64 = 0;
+    families_collected_count_total: u64 = 0,
+    families_failed_count_total: u64 = 0,
+    metrics_collected_count_total: u64 = 0,
+    metrics_failed_count_total: u64 = 0,
+
+    const help = struct {
+        pub const families_collected_count_total: []const u8 = "The metric families collected";
+        pub const families_failed_count_total: []const u8 = "The collected metric families that failed to be exposed";
+        pub const metrics_collected_count_total: []const u8 = "The metrics collected";
+        pub const metrics_failed_count_total: []const u8 = "The collected metrics that failed to be exposed";
+    };
 };
+
+fn collectSelf(ptr: *anyopaque, arena: std.mem.Allocator) error{OutOfMemory}![]Collector.MetricFamily {
+    const exposer: *Exposer = @alignCast(@ptrCast(ptr));
+
+    const exh = exposer.exhibitionism.?;
+
+    // We do not lock because we can only be called from within ourselves while already holding the lock.
+
+    const stats_info = @typeInfo(Statistics).Struct;
+
+    const families = try arena.alloc(Collector.MetricFamily, stats_info.fields.len);
+
+    inline for (stats_info.fields, 0..) |f, i| {
+        const h = @field(Statistics.help, f.name);
+
+        families[i] = .{
+            .name = try std.mem.concat(arena, u8, &.{ exh.prefix, f.name }),
+            .help = h,
+            .type = .counter,
+            .data = blk_data: {
+                const metric: Metric = .{
+                    .value = .{ .counter = @floatFromInt(@field(exposer.stats, f.name)) },
+                    .labels = exh.labels,
+                };
+                break :blk_data try arena.dupe(Metric, &.{try metric.dupe(arena)});
+            },
+        };
+    }
+
+    return families;
+}
 
 const MetricFamily = struct {
     name: []const u8,
@@ -260,7 +336,18 @@ test collectAndWriteAll {
         },
     } };
 
-    var exposer: Exposer = .{ .gpa = testing.allocator };
+    var buf: [64]u8 = undefined;
+    const pid_s = try std.fmt.bufPrint(&buf, "{}", .{1}); // TODO: uhh how do i get crossplatform pid
+
+    var exposer: Exposer = undefined;
+    try exposer.init(testing.allocator, .{
+        .exhibitionism = .{
+            .prefix = "pxx_",
+            .labels = &.{
+                .{ .n = "pid", .v = pid_s },
+            },
+        },
+    });
     defer exposer.deinit();
 
     try exposer.add(c.collector());
