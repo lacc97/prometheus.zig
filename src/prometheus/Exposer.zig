@@ -92,25 +92,25 @@ fn collectAll(arena: std.mem.Allocator, collectors: []const Collector) !std.Stri
                     continue;
                 }
 
-                if (!isValidLabels(m_collected.labels)) {
+                if (!isValidMetricLabels(m_collected.labels)) {
                     metrics_skipped_invalid_labels_count += 1;
                     continue;
                 }
 
                 // Collect all non-empty values.
                 const labels = blk_labels: {
-                    var labels = try std.ArrayListUnmanaged(Label).initCapacity(arena, m_collected.labels.len);
-                    for (m_collected.labels) |l_collected| if (l_collected[1].len > 0) labels.appendAssumeCapacity(l_collected);
+                    var labels = try std.ArrayListUnmanaged(MetricLabel).initCapacity(arena, m_collected.labels.len);
+                    for (m_collected.labels) |l_collected| if (l_collected.v.len > 0) labels.appendAssumeCapacity(l_collected);
                     break :blk_labels labels.toOwnedSlice(arena) catch unreachable;
                 };
 
                 std.sort.pdq(
-                    Label,
+                    MetricLabel,
                     labels,
                     {},
                     struct {
-                        fn lessThan(_: void, a: Label, b: Label) bool {
-                            return std.mem.order(u8, a[0], b[0]) == .lt;
+                        fn lessThan(_: void, a: MetricLabel, b: MetricLabel) bool {
+                            return std.mem.order(u8, a.n, b.n) == .lt;
                         }
                     }.lessThan,
                 );
@@ -145,15 +145,15 @@ fn writeAll(w: anytype, families: std.StringArrayHashMapUnmanaged(MetricFamily))
 fn writeFloatMetric(
     w: anytype,
     name: []const u8,
-    labels: []const Label,
+    labels: []const MetricLabel,
     value: f64,
 ) !void {
     try w.writeAll(name);
     if (labels.len > 0) {
         try w.writeByte('{');
         for (labels) |l| {
-            try w.print("{s}=\"", .{l[0]});
-            for (l[1]) |ch| {
+            try w.print("{s}=\"", .{l.n});
+            for (l.v) |ch| {
                 const ch0: u8 = switch (ch) {
                     '\n' => blk: {
                         try w.writeByte('\\');
@@ -175,29 +175,41 @@ fn writeFloatMetric(
     try w.print(" {}\n", .{value});
 }
 
+const Statistics = struct {
+    var families_collected_count: u64 = 0;
+    var families_skipped_invalid_name_count: u64 = 0;
+    var families_skipped_mismatched_help_count: u64 = 0;
+    var families_skipped_mismatched_type_count: u64 = 0;
+    var metrics_collected_count: u64 = 0;
+    var metrics_skipped_count: u64 = 0;
+    var metrics_skipped_mismatched_type_count: u64 = 0;
+    var metrics_skipped_invalid_labels_count: u64 = 0;
+    var metrics_skipped_duplicate_count: u64 = 0;
+};
+
 const MetricFamily = struct {
     name: []const u8,
     help: []const u8,
     type: MetricType,
-    data: std.ArrayHashMapUnmanaged([]const Label, MetricValue, HashMapContext, true),
+    data: std.ArrayHashMapUnmanaged([]const MetricLabel, MetricValue, HashMapContext, true),
 
     const HashMapContext = struct {
-        pub fn hash(_: HashMapContext, x: []const Label) u32 {
+        pub fn hash(_: HashMapContext, x: []const MetricLabel) u32 {
             var h = std.hash.Wyhash.init(0);
             h.update(std.mem.asBytes(&x.len));
             for (x) |y| {
-                h.update(std.mem.asBytes(&y[0].len));
-                h.update(y[0]);
-                h.update(std.mem.asBytes(&y[1].len));
-                h.update(y[1]);
+                h.update(std.mem.asBytes(&y.n.len));
+                h.update(y.n);
+                h.update(std.mem.asBytes(&y.v.len));
+                h.update(y.v);
             }
             return @truncate(h.final());
         }
 
-        pub fn eql(_: HashMapContext, a: []const Label, b: []const Label, _: usize) bool {
+        pub fn eql(_: HashMapContext, a: []const MetricLabel, b: []const MetricLabel, _: usize) bool {
             if (a.len != b.len) return false;
             for (a, b) |aa, bb| {
-                if (!std.mem.eql(u8, aa[0], bb[0]) or !std.mem.eql(u8, aa[1], aa[1])) {
+                if (!std.mem.eql(u8, aa.n, bb.n) or !std.mem.eql(u8, aa.v, aa.v)) {
                     return false;
                 }
             }
@@ -209,7 +221,7 @@ const MetricFamily = struct {
 const MetricType = Collector.MetricType;
 const Metric = Collector.Metric;
 const MetricValue = Collector.MetricValue;
-const Label = struct { []const u8, []const u8 };
+const MetricLabel = Collector.MetricLabel;
 
 fn isValidMetricName(name: []const u8) bool {
     _ = name; // autofix
@@ -217,7 +229,7 @@ fn isValidMetricName(name: []const u8) bool {
     return true;
 }
 
-fn isValidLabels(labels: []const Label) bool {
+fn isValidMetricLabels(labels: []const MetricLabel) bool {
     _ = labels; // autofix
     // TODO:
     return true;
@@ -234,15 +246,15 @@ test collectAndWriteAll {
             .data = &.{
                 .{
                     .value = .{ .counter = 1.0 },
-                    .labels = &.{ .{ "kind", "tcp" }, .{ "direction", "rx" } },
+                    .labels = &.{ .{ .n = "kind", .v = "tcp" }, .{ .n = "direction", .v = "rx" } },
                 },
                 .{
                     .value = .{ .counter = 110.0 },
-                    .labels = &.{.{ "kind", "udp" }},
+                    .labels = &.{.{ .n = "kind", .v = "udp" }},
                 },
                 .{
                     .value = .{ .counter = 0.0 },
-                    .labels = &.{ .{ "kind", "" }, .{ "direction", "tx" } },
+                    .labels = &.{ .{ .n = "kind" }, .{ .n = "direction", .v = "tx" } },
                 },
             },
         },
