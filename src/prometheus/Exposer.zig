@@ -13,8 +13,8 @@ stats: Statistics = .{},
 
 exhibitionism: ?InitOptions.Exhibitionism = null,
 
-pub fn init(exposer: *Exposer, gpa: std.mem.Allocator, opts: InitOptions) error{OutOfMemory}!void {
-    exposer.* = .{ .gpa = gpa };
+pub fn init(exp: *Exposer, gpa: std.mem.Allocator, opts: InitOptions) error{OutOfMemory}!void {
+    exp.* = .{ .gpa = gpa };
 
     if (opts.exhibitionism) |exh| {
         const prefix = try gpa.dupe(u8, exh.prefix);
@@ -28,7 +28,7 @@ pub fn init(exposer: *Exposer, gpa: std.mem.Allocator, opts: InitOptions) error{
 
         for (exh.labels) |l| labels.appendAssumeCapacity(try l.dupe(gpa));
 
-        exposer.exhibitionism = .{
+        exp.exhibitionism = .{
             .prefix = prefix,
             .labels = labels.toOwnedSlice(gpa) catch unreachable,
         };
@@ -49,44 +49,44 @@ pub const InitOptions = struct {
     };
 };
 
-pub fn deinit(exposer: *Exposer) void {
-    if (exposer.exhibitionism) |exh| {
-        for (exh.labels) |l| l.deinit(exposer.gpa);
-        exposer.gpa.free(exh.labels);
-        exposer.gpa.free(exh.prefix);
+pub fn deinit(exp: *Exposer) void {
+    if (exp.exhibitionism) |exh| {
+        for (exh.labels) |l| l.deinit(exp.gpa);
+        exp.gpa.free(exh.labels);
+        exp.gpa.free(exh.prefix);
     }
-    exposer.collectables.deinit(exposer.gpa);
+    exp.collectables.deinit(exp.gpa);
 }
 
 /// The collectable must live for at least as long as the exposer.
-pub fn add(exposer: *Exposer, collectable: Collector) error{OutOfMemory}!void {
-    exposer.mutex.lock();
-    defer exposer.mutex.unlock();
+pub fn add(exp: *Exposer, collectable: Collector) error{OutOfMemory}!void {
+    exp.mutex.lock();
+    defer exp.mutex.unlock();
 
-    try exposer.collectables.append(exposer.gpa, collectable);
+    try exp.collectables.append(exp.gpa, collectable);
 }
 
-pub fn collectAndWriteAll(exposer: *Exposer, w: anytype) !void {
-    exposer.mutex.lock();
-    defer exposer.mutex.unlock();
+pub fn collectAndWriteAll(exp: *Exposer, w: anytype) !void {
+    exp.mutex.lock();
+    defer exp.mutex.unlock();
 
-    var arena_state = std.heap.ArenaAllocator.init(exposer.gpa);
+    var arena_state = std.heap.ArenaAllocator.init(exp.gpa);
     defer arena_state.deinit();
 
-    try writeAll(w, try exposer.collectAll(arena_state.allocator()));
+    try writeAll(w, try exp.collectAll(arena_state.allocator()));
 }
 
-fn collectAll(exposer: *Exposer, arena: std.mem.Allocator) !std.StringArrayHashMapUnmanaged(MetricFamily) {
-    const expose_self = exposer.exhibitionism != null;
+fn collectAll(exp: *Exposer, arena: std.mem.Allocator) !std.StringArrayHashMapUnmanaged(MetricFamily) {
+    const expose_self = exp.exhibitionism != null;
 
     var families: std.StringArrayHashMapUnmanaged(MetricFamily) = .{};
-    for (exposer.collectables.items) |c| try exposer.collectSingle(arena, &families, c);
-    if (expose_self) try exposer.collectSingle(arena, &families, .{ .ptr = exposer, .vtb = &.{ .collect = collectSelf } });
+    for (exp.collectables.items) |c| try exp.collectSingle(arena, &families, c);
+    if (expose_self) try exp.collectSingle(arena, &families, .{ .ptr = exp, .vtb = &.{ .collect = collectSelf } });
     return families;
 }
 
 fn collectSingle(
-    exposer: *Exposer,
+    exp: *Exposer,
     arena: std.mem.Allocator,
     families: *std.StringArrayHashMapUnmanaged(MetricFamily),
     c: Collector,
@@ -95,16 +95,16 @@ fn collectSingle(
 
     try families.ensureUnusedCapacity(arena, families_collected.len);
     for (families_collected) |f_collected| {
-        exposer.stats.families_collected_count_total += 1;
-        exposer.stats.metrics_collected_count_total += f_collected.data.len;
+        exp.stats.families_collected_count_total += 1;
+        exp.stats.metrics_collected_count_total += f_collected.data.len;
 
         if (f_collected.data.len == 0) {
             continue;
         }
 
         if (!isValidMetricName(f_collected.name)) {
-            exposer.stats.families_failed_count_total += 1;
-            exposer.stats.metrics_failed_count_total += f_collected.data.len;
+            exp.stats.families_failed_count_total += 1;
+            exp.stats.metrics_failed_count_total += f_collected.data.len;
             continue;
         }
 
@@ -120,26 +120,26 @@ fn collectSingle(
         };
 
         if (f_collected.type != f.type) {
-            exposer.stats.families_failed_count_total += 1;
-            exposer.stats.metrics_failed_count_total += f_collected.data.len;
+            exp.stats.families_failed_count_total += 1;
+            exp.stats.metrics_failed_count_total += f_collected.data.len;
             continue;
         }
 
         if (!std.mem.eql(u8, f_collected.help, f.help)) {
-            exposer.stats.families_failed_count_total += 1;
-            exposer.stats.metrics_failed_count_total += f_collected.data.len;
+            exp.stats.families_failed_count_total += 1;
+            exp.stats.metrics_failed_count_total += f_collected.data.len;
             continue;
         }
 
         try f.data.ensureUnusedCapacity(arena, f_collected.data.len);
         for (f_collected.data) |m_collected| {
             if (std.meta.activeTag(m_collected.value) != f.type) {
-                exposer.stats.metrics_failed_count_total += 1;
+                exp.stats.metrics_failed_count_total += 1;
                 continue;
             }
 
             if (!isValidMetricLabels(m_collected.labels)) {
-                exposer.stats.metrics_failed_count_total += 1;
+                exp.stats.metrics_failed_count_total += 1;
                 continue;
             }
 
@@ -163,7 +163,7 @@ fn collectSingle(
 
             const gop = f.data.getOrPutAssumeCapacity(labels);
             if (gop.found_existing) {
-                exposer.stats.metrics_failed_count_total += 1;
+                exp.stats.metrics_failed_count_total += 1;
                 continue;
             }
             gop.value_ptr.* = m_collected.value;
@@ -233,9 +233,8 @@ const Statistics = struct {
 };
 
 fn collectSelf(ptr: *anyopaque, arena: std.mem.Allocator) error{OutOfMemory}![]Collector.MetricFamily {
-    const exposer: *Exposer = @alignCast(@ptrCast(ptr));
-
-    const exh = exposer.exhibitionism.?;
+    const exp: *Exposer = @alignCast(@ptrCast(ptr));
+    const exh = exp.exhibitionism.?;
 
     // We do not lock because we can only be called from within ourselves while already holding the lock.
 
@@ -252,7 +251,7 @@ fn collectSelf(ptr: *anyopaque, arena: std.mem.Allocator) error{OutOfMemory}![]C
             .type = .counter,
             .data = blk_data: {
                 const metric: Metric = .{
-                    .value = .{ .counter = @floatFromInt(@field(exposer.stats, f.name)) },
+                    .value = .{ .counter = @floatFromInt(@field(exp.stats, f.name)) },
                     .labels = exh.labels,
                 };
                 break :blk_data try arena.dupe(Metric, &.{try metric.dupe(arena)});
