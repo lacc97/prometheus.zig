@@ -4,6 +4,8 @@ const Exposer = @This();
 
 const Collector = @import("Collector.zig");
 
+const Metric = @import("Metric.zig");
+
 mutex: std.Thread.Mutex = .{},
 
 gpa: std.mem.Allocator,
@@ -20,7 +22,7 @@ pub fn init(exp: *Exposer, gpa: std.mem.Allocator, opts: InitOptions) error{OutO
         const prefix = try gpa.dupe(u8, exh.prefix);
         errdefer gpa.free(prefix);
 
-        var labels = try std.ArrayListUnmanaged(MetricLabel).initCapacity(gpa, exh.labels.len);
+        var labels = try std.ArrayListUnmanaged(Metric.Label).initCapacity(gpa, exh.labels.len);
         errdefer {
             for (0..labels.items.len) |i| labels.items[labels.items.len - 1 - i].deinit(gpa);
             labels.deinit(gpa);
@@ -45,7 +47,7 @@ pub const InitOptions = struct {
         prefix: []const u8 = "",
 
         /// A list of labels to be added to every exposer metric.
-        labels: []const MetricLabel = &.{},
+        labels: []const Metric.Label = &.{},
     };
 };
 
@@ -145,17 +147,17 @@ fn collectSingle(
 
             // Collect all non-empty values.
             const labels = blk_labels: {
-                var labels = try std.ArrayListUnmanaged(MetricLabel).initCapacity(arena, m_collected.labels.len);
+                var labels = try std.ArrayListUnmanaged(Metric.Label).initCapacity(arena, m_collected.labels.len);
                 for (m_collected.labels) |l_collected| if (l_collected.v.len > 0) labels.appendAssumeCapacity(l_collected);
                 break :blk_labels labels.toOwnedSlice(arena) catch unreachable;
             };
 
             std.sort.pdq(
-                MetricLabel,
+                Metric.Label,
                 labels,
                 {},
                 struct {
-                    fn lessThan(_: void, a: MetricLabel, b: MetricLabel) bool {
+                    fn lessThan(_: void, a: Metric.Label, b: Metric.Label) bool {
                         return std.mem.order(u8, a.n, b.n) == .lt;
                     }
                 }.lessThan,
@@ -188,7 +190,7 @@ fn writeAll(w: anytype, families: std.StringArrayHashMapUnmanaged(MetricFamily))
 fn writeFloatMetric(
     w: anytype,
     name: []const u8,
-    labels: []const MetricLabel,
+    labels: []const Metric.Label,
     value: f64,
 ) !void {
     try w.writeAll(name);
@@ -232,7 +234,7 @@ const Statistics = struct {
     };
 };
 
-fn collectSelf(ptr: *anyopaque, arena: std.mem.Allocator) error{OutOfMemory}![]Collector.MetricFamily {
+fn collectSelf(ptr: *anyopaque, arena: std.mem.Allocator) error{OutOfMemory}![]Metric.Family {
     const exp: *Exposer = @alignCast(@ptrCast(ptr));
     const exh = exp.exhibitionism.?;
 
@@ -240,7 +242,7 @@ fn collectSelf(ptr: *anyopaque, arena: std.mem.Allocator) error{OutOfMemory}![]C
 
     const stats_info = @typeInfo(Statistics).Struct;
 
-    const families = try arena.alloc(Collector.MetricFamily, stats_info.fields.len);
+    const families = try arena.alloc(Metric.Family, stats_info.fields.len);
 
     inline for (stats_info.fields, 0..) |f, i| {
         const h = @field(Statistics.help, f.name);
@@ -265,11 +267,11 @@ fn collectSelf(ptr: *anyopaque, arena: std.mem.Allocator) error{OutOfMemory}![]C
 const MetricFamily = struct {
     name: []const u8,
     help: []const u8,
-    type: MetricType,
-    data: std.ArrayHashMapUnmanaged([]const MetricLabel, MetricValue, HashMapContext, true),
+    type: Metric.Type,
+    data: std.ArrayHashMapUnmanaged([]const Metric.Label, Metric.Value, HashMapContext, true),
 
     const HashMapContext = struct {
-        pub fn hash(_: HashMapContext, x: []const MetricLabel) u32 {
+        pub fn hash(_: HashMapContext, x: []const Metric.Label) u32 {
             var h = std.hash.Wyhash.init(0);
             h.update(std.mem.asBytes(&x.len));
             for (x) |y| {
@@ -281,7 +283,7 @@ const MetricFamily = struct {
             return @truncate(h.final());
         }
 
-        pub fn eql(_: HashMapContext, a: []const MetricLabel, b: []const MetricLabel, _: usize) bool {
+        pub fn eql(_: HashMapContext, a: []const Metric.Label, b: []const Metric.Label, _: usize) bool {
             if (a.len != b.len) return false;
             for (a, b) |aa, bb| {
                 if (!std.mem.eql(u8, aa.n, bb.n) or !std.mem.eql(u8, aa.v, aa.v)) {
@@ -293,18 +295,13 @@ const MetricFamily = struct {
     };
 };
 
-const MetricType = Collector.MetricType;
-const Metric = Collector.Metric;
-const MetricValue = Collector.MetricValue;
-const MetricLabel = Collector.MetricLabel;
-
 fn isValidMetricName(name: []const u8) bool {
     _ = name; // autofix
     // TODO:
     return true;
 }
 
-fn isValidMetricLabels(labels: []const MetricLabel) bool {
+fn isValidMetricLabels(labels: []const Metric.Label) bool {
     _ = labels; // autofix
     // TODO:
     return true;
