@@ -70,6 +70,31 @@ pub const Family = struct {
             .data = data.toOwnedSlice(gpa) catch unreachable,
         };
     }
+
+    pub fn isValidName(family: Family) bool {
+        if (family.name.len == 0) return false; // empty label
+        if (!(std.ascii.isAlphabetic(family.name[0]) or family.name[0] == '_')) return false; // invalid character
+        for (family.name) |ch| if (!(std.ascii.isAlphanumeric(ch) or ch == '_')) return false; // invalid character
+        return true;
+    }
+
+    test isValidName {
+        const valid = struct {
+            fn valid(name: []const u8) bool {
+                return isValidName(.{ .name = name, .help = undefined, .type = undefined, .data = undefined });
+            }
+        }.valid;
+
+        try testing.expect(valid("asdfa"));
+        try testing.expect(valid("a9fa"));
+        try testing.expect(valid("_f2a"));
+        try testing.expect(valid("_"));
+
+        try testing.expect(!valid(""));
+        try testing.expect(!valid("9a"));
+        try testing.expect(!valid("9a%"));
+        try testing.expect(!valid("9a."));
+    }
 };
 
 pub const Value = union(Type) {
@@ -99,5 +124,31 @@ pub const Label = struct {
         errdefer gpa.free(v);
 
         return .{ .n = n, .v = v };
+    }
+
+    pub fn isValid(label: Label) bool {
+        if (label.n.len == 0) return false; // empty label
+        if (!(std.ascii.isAlphabetic(label.n[0]) or label.n[0] == '_')) return false; // invalid character
+        if (label.n.len >= 2 and (label.n[0] == '_' and label.n[1] == '_')) return false; // reserved prefix
+        for (label.n) |ch| if (!(std.ascii.isAlphanumeric(ch) or ch == '_')) return false; // invalid character
+        return true;
+    }
+
+    test isValid {
+        const valid = struct {
+            fn valid(name: []const u8) bool {
+                return isValid(.{ .n = name, .v = undefined });
+            }
+        }.valid;
+
+        try testing.expect(valid("asdfa"));
+        try testing.expect(valid("a9fa"));
+        try testing.expect(valid("_f2a"));
+        try testing.expect(valid("_"));
+
+        try testing.expect(!valid(""));
+        try testing.expect(!valid("9a"));
+        try testing.expect(!valid("9a%"));
+        try testing.expect(!valid("9a."));
     }
 };

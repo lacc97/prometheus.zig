@@ -96,18 +96,18 @@ fn collectSingle(
     const families_collected = try c.collect(arena);
 
     try families.ensureUnusedCapacity(arena, families_collected.len);
-    for (families_collected) |f_collected| {
+    loop_family: for (families_collected) |f_collected| {
         exp.stats.families_collected_count_total += 1;
         exp.stats.metrics_collected_count_total += f_collected.data.len;
 
         if (f_collected.data.len == 0) {
-            continue;
+            continue :loop_family;
         }
 
-        if (!isValidMetricName(f_collected.name)) {
+        if (!f_collected.isValidName()) {
             exp.stats.families_failed_count_total += 1;
             exp.stats.metrics_failed_count_total += f_collected.data.len;
-            continue;
+            continue :loop_family;
         }
 
         const f = blk_f: {
@@ -124,25 +124,27 @@ fn collectSingle(
         if (f_collected.type != f.type) {
             exp.stats.families_failed_count_total += 1;
             exp.stats.metrics_failed_count_total += f_collected.data.len;
-            continue;
+            continue :loop_family;
         }
 
         if (!std.mem.eql(u8, f_collected.help, f.help)) {
             exp.stats.families_failed_count_total += 1;
             exp.stats.metrics_failed_count_total += f_collected.data.len;
-            continue;
+            continue :loop_family;
         }
 
         try f.data.ensureUnusedCapacity(arena, f_collected.data.len);
-        for (f_collected.data) |m_collected| {
+        loop_metric: for (f_collected.data) |m_collected| {
             if (std.meta.activeTag(m_collected.value) != f.type) {
                 exp.stats.metrics_failed_count_total += 1;
-                continue;
+                continue :loop_metric;
             }
 
-            if (!isValidMetricLabels(m_collected.labels)) {
-                exp.stats.metrics_failed_count_total += 1;
-                continue;
+            for (m_collected.labels) |l_collected| {
+                if (!l_collected.isValid()) {
+                    exp.stats.metrics_failed_count_total += 1;
+                    continue :loop_metric;
+                }
             }
 
             // Collect all non-empty values.
@@ -166,7 +168,7 @@ fn collectSingle(
             const gop = f.data.getOrPutAssumeCapacity(labels);
             if (gop.found_existing) {
                 exp.stats.metrics_failed_count_total += 1;
-                continue;
+                continue :loop_metric;
             }
             gop.value_ptr.* = m_collected.value;
         }
@@ -295,18 +297,6 @@ const MetricFamily = struct {
     };
 };
 
-fn isValidMetricName(name: []const u8) bool {
-    _ = name; // autofix
-    // TODO:
-    return true;
-}
-
-fn isValidMetricLabels(labels: []const Metric.Label) bool {
-    _ = labels; // autofix
-    // TODO:
-    return true;
-}
-
 test collectAndWriteAll {
     const testing = std.testing;
 
@@ -327,6 +317,14 @@ test collectAndWriteAll {
                 .{
                     .value = .{ .counter = 0.0 },
                     .labels = &.{ .{ .n = "kind" }, .{ .n = "direction", .v = "tx" } },
+                },
+                .{
+                    .value = .{ .counter = 1.0 },
+                    .labels = &.{.{ .n = "__asd", .v = "udp" }},
+                },
+                .{
+                    .value = .{ .counter = 2.0 },
+                    .labels = &.{.{ .n = "kind%", .v = "udp" }},
                 },
             },
         },
@@ -352,4 +350,9 @@ test collectAndWriteAll {
     var buffer = std.io.bufferedWriter(stderr_unbuffered);
     try exposer.collectAndWriteAll(buffer.writer());
     try buffer.flush();
+
+    try testing.expectEqual(@as(u64, 1 + 4), exposer.stats.families_collected_count_total);
+    try testing.expectEqual(@as(u64, 0 + 0), exposer.stats.families_failed_count_total);
+    try testing.expectEqual(@as(u64, 5 + 4), exposer.stats.metrics_collected_count_total);
+    try testing.expectEqual(@as(u64, 2 + 0), exposer.stats.metrics_failed_count_total);
 }
